@@ -1,12 +1,11 @@
 import os
 import asyncio
-import pandas as pd
+import csv
 import aiosqlite
-from datetime import datetime
-from aiogram import Bot, Dispatcher, types
+from datetime import datetime, timedelta
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, FSInputFile
 from aiogram.filters import Command
-from aiogram.types import Message
-from aiogram import F
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -28,7 +27,6 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             group_id TEXT,
-            user_id TEXT,
             date TEXT,
             amount INTEGER,
             description TEXT
@@ -36,7 +34,7 @@ async def init_db():
         """)
         await db.commit()
 
-# ---------------- TRANSACTION HANDLER ---------------- #
+# ---------------- ADD / SUBTRACT ---------------- #
 
 @dp.message(F.text.startswith("+") | F.text.startswith("-"))
 async def handle_transaction(message: Message):
@@ -46,18 +44,17 @@ async def handle_transaction(message: Message):
     try:
         parts = message.text.split(" ", 1)
         amount = int(parts[0])
-        description = parts[1] if len(parts) > 1 else "No description"
+        description = parts[1] if len(parts) > 1 else ""
     except:
-        await message.reply("Format: +200 bank or -100 cash")
+        await message.reply("Use format: +200 bank OR -100 cash")
         return
 
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
-        INSERT INTO transactions (group_id, user_id, date, amount, description)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO transactions (group_id, date, amount, description)
+        VALUES (?, ?, ?, ?)
         """, (
             str(message.chat.id),
-            str(message.from_user.id),
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             amount,
             description
@@ -71,13 +68,113 @@ async def handle_transaction(message: Message):
 @dp.message(Command("tt"))
 async def total_balance(message: Message):
     async with aiosqlite.connect(DB_FILE) as db:
-        cursor = await db.execute("""
-        SELECT SUM(amount) FROM transactions WHERE group_id = ?
-        """, (str(message.chat.id),))
+        cursor = await db.execute(
+            "SELECT SUM(amount) FROM transactions WHERE group_id = ?",
+            (str(message.chat.id),)
+        )
         result = await cursor.fetchone()
 
     total = result[0] if result[0] else 0
-    await message.reply(f"📊 Total Balance: ₹{total}")
+    await message.reply(f"📊 Current Balance: ₹{total}")
+
+# ---------------- TOTAL TRANSACTIONS ---------------- #
+
+@dp.message(Command("trns"))
+async def total_transactions(message: Message):
+    async with aiosqlite.connect(DB_FILE) as db:
+        cursor = await db.execute("""
+        SELECT COUNT(*), SUM(ABS(amount))
+        FROM transactions WHERE group_id = ?
+        """, (str(message.chat.id),))
+        result = await cursor.fetchone()
+
+    count = result[0] if result[0] else 0
+    turnover = result[1] if result[1] else 0
+
+    await message.reply(
+        f"📈 Total Transactions: {count}\n"
+        f"💰 Total Turnover: ₹{turnover}"
+    )
+
+# ---------------- HISTORY ---------------- #
+
+@dp.message(Command("his"))
+async def history(message: Message):
+    args = message.text.split()
+
+    group_id = str(message.chat.id)
+
+    if len(args) == 1:
+        # Today
+        target_date = datetime.now().strftime("%Y-%m-%d")
+        query = "SELECT date, amount, description FROM transactions WHERE group_id=? AND date LIKE ?"
+        params = (group_id, target_date + "%")
+
+    else:
+        arg = args[1]
+
+        # Format dd/mm
+        if "/" in arg:
+            try:
+                day, month = map(int, arg.split("/"))
+                year = datetime.now().year
+                target_date = datetime(year, month, day).strftime("%Y-%m-%d")
+                query = "SELECT date, amount, description FROM transactions WHERE group_id=? AND date LIKE ?"
+                params = (group_id, target_date + "%")
+            except:
+                await message.reply("Use format: /his dd/mm")
+                return
+
+        # Format 3d / 7d
+        elif arg.endswith("d"):
+            try:
+                days = int(arg[:-1])
+                start_date = datetime.now() - timedelta(days=days)
+                query = "SELECT date, amount, description FROM transactions WHERE group_id=? AND date >= ?"
+                params = (group_id, start_date.strftime("%Y-%m-%d"))
+            except:
+                await message.reply("Use format: /his 3d")
+                return
+        else:
+            await message.reply("Invalid format.")
+            return
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        cursor = await db.execute(query, params)
+        rows = await cursor.fetchall()
+
+    if not rows:
+        await message.reply("No transactions found.")
+        return
+
+    text = "📜 Transaction History:\n\n"
+    for row in rows:
+        date, amount, description = row
+        text += f"{date} | {amount} | {description}\n"
+
+    await message.reply(text)
+
+# ---------------- GUIDE ---------------- #
+
+@dp.message(Command("guide"))
+async def guide(message: Message):
+    text = """
+📘 Ledger Bot Guide
+
+➕ Add: +200 bank
+➖ Subtract: -100 cash
+
+📊 /tt → Current balance
+📈 /trns → Total transactions + turnover
+📜 /his → Today history
+📜 /his dd/mm → Specific date
+📜 /his 3d → Last 3 days
+📜 /his 7d → Last 7 days
+📁 /export → Download CSV (Admin only)
+
+Only admin can add transactions.
+"""
+    await message.reply(text)
 
 # ---------------- EXPORT ---------------- #
 
@@ -86,45 +183,27 @@ async def export_csv(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
 
+    file_name = "transactions.csv"
+
     async with aiosqlite.connect(DB_FILE) as db:
         cursor = await db.execute("""
-        SELECT date, user_id, amount, description
-        FROM transactions WHERE group_id = ?
+        SELECT date, amount, description
+        FROM transactions WHERE group_id=?
+        ORDER BY id ASC
         """, (str(message.chat.id),))
         rows = await cursor.fetchall()
 
-    df = pd.DataFrame(rows, columns=["Date", "User ID", "Amount", "Description"])
-    file_name = "transactions.csv"
-    df.to_csv(file_name, index=False)
+    with open(file_name, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Date & Time", "+/- Amount", "Description"])
+        writer.writerows(rows)
 
-    await message.reply_document(types.FSInputFile(file_name))
-
-# ---------------- DAILY SUMMARY ---------------- #
-
-async def daily_summary():
-    async with aiosqlite.connect(DB_FILE) as db:
-        today = datetime.now().strftime("%Y-%m-%d")
-        cursor = await db.execute("""
-        SELECT SUM(amount) FROM transactions
-        WHERE date LIKE ?
-        """, (today + "%",))
-        result = await cursor.fetchone()
-
-    total_today = result[0] if result[0] else 0
-
-    await bot.send_message(
-        ADMIN_ID,
-        f"📅 Daily Summary\nTotal Today: ₹{total_today}"
-    )
-
-scheduler = AsyncIOScheduler()
-scheduler.add_job(daily_summary, "cron", hour=23, minute=59)
+    await message.reply_document(FSInputFile(file_name))
 
 # ---------------- START ---------------- #
 
 async def main():
     await init_db()
-    scheduler.start()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
