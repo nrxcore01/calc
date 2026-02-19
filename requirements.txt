@@ -1,5 +1,5 @@
 aiogram==3.4.1
-aiosqlite
+asyncpg
 python-dotenv
-apscheduler
 reportlab
+apscheduler
