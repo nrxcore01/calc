@@ -71,6 +71,42 @@ async def add_transaction(message: Message):
         f"📝 {description}"
     )
 
+# ---------- GUIDE ---------- #
+
+@dp.message(Command("guide"))
+async def guide(message: Message):
+    text = """
+📘 Ledger Bot Guide
+
+➕ Add Transaction:
++200 bank
+-150 cash
+
+📊 /tt
+→ Show current balance
+
+📈 /trns
+→ Show total transactions + turnover + full list
+
+📜 /his
+→ Today's transactions
+
+📜 /his dd/mm
+→ Specific date (example: /his 19/02)
+
+📜 /his 3d
+→ Last 3 days
+
+❌ /remove
+→ Select transaction to delete (Admin only)
+
+📄 /export
+→ Download full ledger as PDF (Admin only)
+
+⚙ Only admin can add/delete transactions.
+"""
+    await message.reply(text)
+    
 # ---------- TOTAL BALANCE ---------- #
 
 @dp.message(Command("tt"))
